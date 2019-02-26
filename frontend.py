@@ -14,9 +14,9 @@ class Frontend(object):
 
     @Pyro4.expose
     def get_free(self):
-        if main_replica.get_status() == 'active':
+        if self.main_replica.get_status() == 'active':
             return self.main_replica
-        replicas = ns.list(metadata_all={'replica'})
+        replicas = self.ns.list(metadata_all={'replica'})
         for name in replicas:
             proxy = Pyro4.Proxy('PYRONAME:' + name)
             status = proxy.get_status()

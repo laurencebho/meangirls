@@ -1,4 +1,4 @@
-import Pyro4, uuid, random, csv, threading
+import Pyro4, uuid, random, csv, threading, time
 
 class Replica:
     def __init__(self, ns, id=None):
@@ -25,12 +25,16 @@ class Replica:
         gossip_thread.start()
 
 
+    @Pyro4.expose
     def get_id(self):
         return self.id
     
     @Pyro4.expose
-    def get_updates(self):
-        return {self.id : self.updates}
+    def get_updates(self, old_timestamp):
+        timestamp_diff = self.clock[self.id] - old_timestamp
+        if timestamp_diff > 0:
+            return {self.id : self.updates[-timestamp_diff:]}
+        return {self.id: []}
 
     @Pyro4.expose
     def get_timestamp(self):
@@ -55,19 +59,24 @@ class Replica:
 
 
     def init_movies(self):
-        replicas = ns.list(metadata_all={'replica'})
+        replicas = self.ns.list(metadata_all={'replica'})
         if len(replicas) == 0:
             return self.read_movies()
-        for name in replicas:
-            proxy = Pyro4.Proxy('PYRONAME:' + name)
-            status = proxy.get_status()
-            if status == 'active':
-                return proxy.get_movies()
-        raise RuntimeError('couldn\'t initialise replica - all others unavailable')
+        n = 3
+        while True:
+            n -= 1
+            for name in replicas:
+                proxy = Pyro4.Proxy('PYRONAME:' + name)
+                status = proxy.get_status()
+                if status == 'active':
+                    return proxy.get_movies()
+            if n == 0:
+                raise RuntimeError('couldn\'t initialise replica - all others unavailable')
+            time.sleep(0.1)
 
 
     def init_clock(self): #doesn't add self to clock currently
-        replicas = ns.list(metadata_all={'replica'})
+        replicas = self.ns.list(metadata_all={'replica'})
         clock = {}
         for name in replicas:
             clock[name] = 0
@@ -83,33 +92,37 @@ class Replica:
         for id, val in vector.items():
             self.clock[id] = val
 
-
-    def update_rating(self, uid, movie_id, rating):
+    @Pyro4.expose
+    def update_rating(self, uid, movie_id, rating, add_to_updates=True):
         if uid not in self.movies:
             self.movies[uid] = {}
         self.movies[uid][movie_id] = rating
-        self.updates += (uid, movie_id, rating)
+        if add_to_updates:
+            self.updates.append((uid, movie_id, rating))
         print('movie {0} for user {1} rated {2}'.format(movie_id, uid, rating))
         self.inc_clock()
         return (self.id, self.clock[self.id])
 
 
+    def find_rating(self, uid, movie_id):
+        if uid in self.movies:
+            if movie_id in self.movies[uid]:
+                return str(self.movies[uid][movie_id])
+        return 'Not found'
+
+    @Pyro4.expose
     def get_rating(self, uid, movie_id, timestamp=None):
+
         if timestamp is not None:
             # if replica is up to date with client then give rating back, else wait
             if self.clock[timestamp[0]] >= timestamp[1]:
-                return find_rating(self, uid, movie_id)
+                return self.find_rating(uid, movie_id)
             else:
                 print('waiting for updates')
                 time.sleep(1)
-                return get_rating(self, uid, movie_id, timestamp)
-        return find_rating(self, uid, movie_id)
+                return self.get_rating(uid, movie_id, timestamp)
+        return self.find_rating(uid, movie_id)
 
-        def find_rating(self, uid, movie_id):
-            if uid in self.movies:
-                if movie_id in self.movies[uid]:
-                    return str(self.movies[uid][movie_id])
-            return 'Not found'
 
     # returns True if a has priority over b
     # creates a global order which can be used to handle concurrent writes
@@ -118,41 +131,60 @@ class Replica:
             return True
         return False
 
-    def apply_updates(self, updates): #obviously not consistent
+
+    def resolve_clash(self, my_timestamp, their_timestamp, rating):
+        if my_timestamp > their_timestamp:
+            self.update_rating(*rating, False)
+        elif my_timestamp == their_timestamp:
+            # if I have priority, apply their update after mine
+            if self.has_priority(self.id, name):
+                self.update_rating(*rating, False)
+            else:
+                self.inc_clock()
+        else:
+            # inc clock even if update doesn't need to be applied
+            self.inc_clock() 
+
+
+    def apply_updates(self, updates):
+        update_count = len(self.updates)
         for name, ratings in updates.items():
-            timestamp = self.clock[name]
-            for i, r in enumerate(ratings):
+            neighbour_timestamp = self.clock[name] # and if old value + neighbour_update_count != this then handle
+            neighbour_update_count = len(ratings)
+            for i, rating in enumerate(ratings):
+                clash = False
                 for j, update in enumerate(reversed(self.updates)):
-                    if update[0] == r[0] and update[1] == r[1]:
+                    #if uid and movie id match there is a clash
+                    if update[0] == rating[0] and update[1] == rating[1]:
                         my_timestamp = self.clock[self.id] - j
-                        their_timestamp = timestamp + i
-                        if my_timestamp > their_timestamp:
-                            self.update_rating(*r)
-                        elif my_timestamp == their_timestamp:
-                            # if I have priority, apply their update after mine
-                            if self.has_priority(self.id, name):
-                                self.update_rating(*r)
-                            else:
-                                self.inc_clock()
-                        else:
-                            # inc clock even if update doesn't need to be applied
-                            self.inc_clock() 
+                        their_timestamp = neighbour_timestamp - (neighbour_update_count - i)
+                        self.resolve_clash(my_timestamp, their_timestamp, rating)
+                        clash = True
                         break
+                if not clash:
+                    print('rating is {0}'.format(rating))
+                    self.update_rating(*rating, False)
 
 
     def gossip(self):
-        replicas = ns.list(metadata_all={'replica'})
-        del replicas[self.id] # remove itself from the dict
-        updates = {}
-        vector = {}
-        for name in replicas:
-            proxy = Pyro4.Proxy('PYRONAME:' + name)
-            status = proxy.get_status()
-            if status == 'active':
-                updates.update(proxy.get_updates())
-                vector[name] = proxy.get_timestamp()
-        self.update_clock(vector)
-        self.apply_updates(updates)
+        while True:
+            time.sleep(5)
+            replicas = self.ns.list(metadata_all={'replica'})
+            del replicas[self.id] # remove itself from the dict
+            updates = {}
+            vector = {}
+            for name in replicas:
+                proxy = Pyro4.Proxy('PYRONAME:' + name)
+                status = proxy.get_status()
+                if status == 'active':
+                    rep_id = proxy.get_id()
+                    old_timestamp = self.clock[rep_id] if rep_id in self.clock else 0 
+                    print('old timestamp: {0}'.format(old_timestamp))
+                    updates.update(proxy.get_updates(old_timestamp))
+                    vector[name] = proxy.get_timestamp()
+            self.update_clock(vector)
+            print(updates)
+            self.apply_updates(updates)
 
 
     @Pyro4.expose
