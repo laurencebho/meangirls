@@ -11,9 +11,10 @@ def get_id():
     return uid
 
 def get_choice():
+    valid_choices = ['w', 'W', 'r', 'R', 'q', 'Q', 'h', 'H']
     while True:
         choice = input('Enter choice (w)rite, (r)ead, (q)uit: ')
-        if choice in ['w', 'r', 'q']:
+        if choice in :
             return choice
         print('Not a valid choice.')
 
@@ -37,35 +38,44 @@ def get_rating():
             print('Invalid rating - must be an integer or float')
     return r
 
-def read(replica, uid, movie_id, timestamp=None):
+def read(frontend, uid, movie_id, client_id);
     print('reading rating...')
-    rating = replica.get_rating(uid, movie_id, timestamp)
-    print('Rating for user {0} and movie {1}: {2}'.format(uid, movie_id, rating))
+    res = frontend.read(uid, movie_id, client_id)
+    if res is not None:
+        print('Rating for user {0} and movie {1}: {2}'.format(uid, movie_id, res))
+    else:
+        print('A rating for user {0} and movie {1} was not found.'.format(uid, movie_id))
 
 
-def write(replica, uid, movie_id, rating):
+def write(frontend, uid, movie_id, rating):
     print('writing rating...')
-    timestamp = replica.update_rating(uid, movie_id, rating)
-    print('written rating')
-    return timestamp
+    frontend.write(uid, movie_id, rating, client_id)
+    print('rating successfully written')
+
+
+def show_help():
+    print('')
+    print('This system allows you to read and write movie ratings')
+    print('Enter "w" to write (add or update) a rating, "r" to read a movie rating, and "q" to quit')
+    print('')
 
 
 def main():
     frontend = Pyro4.Proxy('PYRONAME:frontend')
-    replica = frontend.get_free()
-    uid = get_id()
-    timestamp = None
+    client_id = fronted.register_client()
     while True:
         choice = get_choice()
-        if choice == 'q':
+        if choice in ['q', 'Q']:
             break
-        elif choice == 'r':
+        elif choice in ['r', 'R']:
             movie_id = get_movie_id()
             read(replica, uid, movie_id, timestamp)
-        else:
+        elif choice in ['w', 'W']:
             movie_id = get_movie_id()
             rating = get_rating()
             timestamp = write(replica, uid, movie_id, rating)
+        elif choice in ['h', 'H']:
+            show_help()
 
 
 if __name__ == '__main__':
