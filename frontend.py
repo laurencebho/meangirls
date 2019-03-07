@@ -1,4 +1,4 @@
-import Pyro4, uuid
+import Pyro4, uuid, time
 from replica import Replica
 from contextlib import contextmanager
 from vector_clock import VectorClock
@@ -9,8 +9,14 @@ class Frontend(object):
         self.ns = ns  
         self.main_replica = self.create_main_rep()
         self.clients = {}
+        
+        #temporary store for operations - so they can be reapplied
+        #when a server goes offline unexpectedly
+        self.read_ops = [] 
+        self.write_ops = []
     
-
+    
+    #create the FE's main replica
     def create_main_rep(self):
         replica = Replica(self.ns, 'main')
         return Pyro4.Proxy('PYRONAME:main')
@@ -24,15 +30,29 @@ class Frontend(object):
         return client_id
 
 
+    #handling the exception thrown when a replica goes offline
+    @contextmanager
+    def handle_error(self):
+        try:
+            yield
+        except RuntimeError:
+            print("A replica has gone offline")
+            for q in self.read_ops:
+                self.read(*q)
+            for u in self.write_ops:
+                self.write(*q)
+
+
     #reading a rating
     @Pyro4.expose
     def read(self, uid, movie_id, client_id):
-        q = {'uid': uid, 'movie_id': movie_id, 'prev': self.clients[client_id]}
-        with handle_error():
+        q = {'uid': uid, 'movie_id': movie_id, 'prev': self.clients[client_id].get_vector()}
+        with self.handle_error():
             replica = self.get_free()
-            self.read_ops.append(q)
+            op = (uid, movie_id, client_id)
+            self.read_ops.append(op)
             res, ts = replica.handle_query(q)
-            del self.read_ops[self.read_ops.index(q)]
+            del self.read_ops[self.read_ops.index(op)]
             self.clients[client_id].merge(ts)
             return res
 
@@ -40,26 +60,14 @@ class Frontend(object):
     #writing a rating
     @Pyro4.expose
     def write(self, uid, movie_id, rating, client_id):
-        u = {'uid': uid, 'movie_id': movie_id, 'rating': rating, 'prev': self.clients[client_id]}
-        with handle_error():
+        u = {'uid': uid, 'movie_id': movie_id, 'rating': rating, 'prev': self.clients[client_id].get_vector()}
+        with self.handle_error():
             replica = self.get_free()
-            self.read_ops.append(u)
+            op = (uid, movie_id, rating, client_id)
+            self.write_ops.append(op)
             ts = replica.handle_update(u)
-            del self.write_ops[self.write_ops.index(u)]
+            del self.write_ops[self.write_ops.index(op)]
             self.clients[client_id].merge(ts)
-
-
-    #handling the exception thrown when a replica goes offline
-    @contextmanager
-    def handle_error():
-        try:
-            yield
-        except RuntimeError as err:
-            print("Error: {0}".format(err))
-            for q in self.read_ops:
-                read(*q)
-            for u in self.write_ops:
-                write(*q)
 
 
     #tries to get an active replica a maximum of 3 times
